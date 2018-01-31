@@ -12,9 +12,6 @@ type goCollector struct {
 	threadsDesc    *Desc
 	gcDesc         *Desc
 	goInfoDesc     *Desc
-
-	// metrics to describe and collect
-	metrics memStatsMetrics
 }
 
 // NewGoCollector returns a collector which exports metrics about the current
@@ -37,6 +34,53 @@ func NewGoCollector() Collector {
 			"go_info",
 			"Information about the Go environment.",
 			nil, Labels{"version": runtime.Version()}),
+	}
+}
+
+// Describe returns all descriptions of the collector.
+func (c *goCollector) Describe(ch chan<- *Desc) {
+	ch <- c.goroutinesDesc
+	ch <- c.threadsDesc
+	ch <- c.gcDesc
+	ch <- c.goInfoDesc
+}
+
+// Collect returns the current state of all metrics of the collector.
+func (c *goCollector) Collect(ch chan<- Metric) {
+	ch <- MustNewConstMetric(c.goroutinesDesc, GaugeValue, float64(runtime.NumGoroutine()))
+	n, _ := runtime.ThreadCreateProfile(nil)
+	ch <- MustNewConstMetric(c.threadsDesc, GaugeValue, float64(n))
+
+	var stats debug.GCStats
+	stats.PauseQuantiles = make([]time.Duration, 5)
+	debug.ReadGCStats(&stats)
+
+	quantiles := make(map[float64]float64)
+	for idx, pq := range stats.PauseQuantiles[1:] {
+		quantiles[float64(idx+1)/float64(len(stats.PauseQuantiles)-1)] = pq.Seconds()
+	}
+	quantiles[0.0] = stats.PauseQuantiles[0].Seconds()
+	ch <- MustNewConstSummary(c.gcDesc, uint64(stats.NumGC), float64(stats.PauseTotal.Seconds()), quantiles)
+
+	ch <- MustNewConstMetric(c.goInfoDesc, GaugeValue, 1)
+}
+
+// memStatsMetrics provide description, value, and value type for memstat metrics.
+type memStatsMetrics []struct {
+	desc    *Desc
+	eval    func(*runtime.MemStats) float64
+	valType ValueType
+}
+
+type goMemstatsCollector struct {
+	metrics memStatsMetrics
+}
+
+// NewGoMemstatsCollector returns a new collector for go memomy statistics.
+// See runtime.Memstats. Be aware that collecting this statistics stops the
+// world (go's runtime).
+func NewGoMemstatsCollector() Collector {
+	return &goMemstatsCollector{
 		metrics: memStatsMetrics{
 			{
 				desc: NewDesc(
@@ -235,40 +279,15 @@ func NewGoCollector() Collector {
 	}
 }
 
-func memstatNamespace(s string) string {
-	return fmt.Sprintf("go_memstats_%s", s)
-}
-
 // Describe returns all descriptions of the collector.
-func (c *goCollector) Describe(ch chan<- *Desc) {
-	ch <- c.goroutinesDesc
-	ch <- c.threadsDesc
-	ch <- c.gcDesc
-	ch <- c.goInfoDesc
+func (c *goMemstatsCollector) Describe(ch chan<- *Desc) {
 	for _, i := range c.metrics {
 		ch <- i.desc
 	}
 }
 
 // Collect returns the current state of all metrics of the collector.
-func (c *goCollector) Collect(ch chan<- Metric) {
-	ch <- MustNewConstMetric(c.goroutinesDesc, GaugeValue, float64(runtime.NumGoroutine()))
-	n, _ := runtime.ThreadCreateProfile(nil)
-	ch <- MustNewConstMetric(c.threadsDesc, GaugeValue, float64(n))
-
-	var stats debug.GCStats
-	stats.PauseQuantiles = make([]time.Duration, 5)
-	debug.ReadGCStats(&stats)
-
-	quantiles := make(map[float64]float64)
-	for idx, pq := range stats.PauseQuantiles[1:] {
-		quantiles[float64(idx+1)/float64(len(stats.PauseQuantiles)-1)] = pq.Seconds()
-	}
-	quantiles[0.0] = stats.PauseQuantiles[0].Seconds()
-	ch <- MustNewConstSummary(c.gcDesc, uint64(stats.NumGC), float64(stats.PauseTotal.Seconds()), quantiles)
-
-	ch <- MustNewConstMetric(c.goInfoDesc, GaugeValue, 1)
-
+func (c *goMemstatsCollector) Collect(ch chan<- Metric) {
 	ms := &runtime.MemStats{}
 	runtime.ReadMemStats(ms)
 	for _, i := range c.metrics {
@@ -276,9 +295,6 @@ func (c *goCollector) Collect(ch chan<- Metric) {
 	}
 }
 
-// memStatsMetrics provide description, value, and value type for memstat metrics.
-type memStatsMetrics []struct {
-	desc    *Desc
-	eval    func(*runtime.MemStats) float64
-	valType ValueType
+func memstatNamespace(s string) string {
+	return fmt.Sprintf("go_memstats_%s", s)
 }
